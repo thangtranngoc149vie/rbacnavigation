@@ -1,4 +1,3 @@
-using System.Data;
 using System.Data.Common;
 using Dapper;
 using RbacNavigation.Api.Data;
@@ -57,22 +56,12 @@ DO UPDATE SET value = CAST(EXCLUDED.value AS jsonb), updated_at = now();
 
     public Task<UserRoleRecord?> GetUserRoleAsync(DbConnection connection, Guid userId, CancellationToken cancellationToken)
     {
-        var command = CreateCommand(UserRoleSql, parameters =>
-        {
-            parameters.Add("userId", userId, DbType.Guid);
-        }, cancellationToken);
-
-        return connection.QuerySingleOrDefaultAsync<UserRoleRecord>(command);
+        return connection.QuerySingleOrDefaultAsync<UserRoleRecord>(new CommandDefinition(UserRoleSql, new { userId }, cancellationToken: cancellationToken));
     }
 
     public Task<string?> GetNavigationMapAsync(DbConnection connection, Guid orgId, CancellationToken cancellationToken)
     {
-        var command = CreateCommand(NavMapSql, parameters =>
-        {
-            parameters.Add("orgId", orgId, DbType.Guid);
-        }, cancellationToken);
-
-        return connection.QuerySingleOrDefaultAsync<string>(command);
+        return connection.QuerySingleOrDefaultAsync<string>(new CommandDefinition(NavMapSql, new { orgId }, cancellationToken: cancellationToken));
     }
 
     public Task<RoleRecord?> GetRoleAsync(DbConnection connection, Guid roleId, CancellationToken cancellationToken)

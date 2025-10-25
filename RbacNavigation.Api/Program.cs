@@ -1,14 +1,11 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Net.Http.Headers;
 using Microsoft.OpenApi.Models;
-using RbacNavigation.Api.Authorization;
 using RbacNavigation.Api.Data;
 using RbacNavigation.Api.Services;
 using Serilog;
-using System.Text.Encodings.Web;
 
 Log.Logger = new LoggerConfiguration()
     .WriteTo.Console()
@@ -77,15 +74,6 @@ try
 
     builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         .AddJwtBearer();
-
-    builder.Services.AddHttpContextAccessor();
-
-    builder.Services.AddSingleton<HtmlEncoder>(_ => HtmlEncoder.Default);
-    builder.Services.AddSingleton<NavigationContentSanitizer>();
-
-    builder.Services.AddScoped<ICurrentUserContextAccessor, CurrentUserContextAccessor>();
-    builder.Services.AddScoped<IAuthorizationHandler, PermissionsAuthorizationHandler>();
-    builder.Services.AddScoped<IAuthorizationHandler, OrganizationScopeAuthorizationHandler>();
 
     builder.Services.AddAuthorization();
 

@@ -16,13 +16,7 @@ public sealed class OrganizationScopeAuthorizationHandler : AuthorizationHandler
         OrganizationScopeRequirement requirement,
         IOrganizationResource resource)
     {
-        if (resource is null)
-        {
-            return;
-        }
-
-        var cancellationToken = context.GetCancellationToken();
-        var userContext = await _contextAccessor.GetCurrentAsync(cancellationToken);
+        var userContext = await _contextAccessor.GetCurrentAsync();
         if (userContext is null)
         {
             return;

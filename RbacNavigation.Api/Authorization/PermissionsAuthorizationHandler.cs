@@ -13,8 +13,7 @@ public sealed class PermissionsAuthorizationHandler : AuthorizationHandler<Permi
 
     protected override async Task HandleRequirementAsync(AuthorizationHandlerContext context, PermissionsRequirement requirement)
     {
-        var cancellationToken = context.GetCancellationToken();
-        var userContext = await _contextAccessor.GetCurrentAsync(cancellationToken);
+        var userContext = await _contextAccessor.GetCurrentAsync();
         if (userContext is null)
         {
             return;
@@ -27,28 +26,33 @@ public sealed class PermissionsAuthorizationHandler : AuthorizationHandler<Permi
         }
 
         var permissions = userContext.Permissions;
-
-        if (requirement.RequireAll)
-        {
-            foreach (var descriptor in requirement.Permissions)
-            {
-                if (!permissions.Has(descriptor.Domain, descriptor.Area, descriptor.Action))
-                {
-                    return;
-                }
-            }
-
-            context.Succeed(requirement);
-            return;
-        }
+        var matches = 0;
 
         foreach (var descriptor in requirement.Permissions)
         {
             if (permissions.Has(descriptor.Domain, descriptor.Area, descriptor.Action))
             {
-                context.Succeed(requirement);
+                if (!requirement.RequireAll)
+                {
+                    context.Succeed(requirement);
+                    return;
+                }
+
+                matches++;
+            }
+            else if (requirement.RequireAll)
+            {
                 return;
             }
+        }
+
+        if (requirement.RequireAll && matches == requirement.Permissions.Count)
+        {
+            context.Succeed(requirement);
+        }
+        else if (!requirement.RequireAll && requirement.Permissions.Count == 0)
+        {
+            context.Succeed(requirement);
         }
     }
 }
