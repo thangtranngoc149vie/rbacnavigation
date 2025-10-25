@@ -66,11 +66,29 @@ DO UPDATE SET value = CAST(EXCLUDED.value AS jsonb), updated_at = now();
 
     public Task<RoleRecord?> GetRoleAsync(DbConnection connection, Guid roleId, CancellationToken cancellationToken)
     {
-        return connection.QuerySingleOrDefaultAsync<RoleRecord>(new CommandDefinition(RoleSql, new { roleId }, cancellationToken: cancellationToken));
+        var command = CreateCommand(RoleSql, parameters =>
+        {
+            parameters.Add("roleId", roleId, DbType.Guid);
+        }, cancellationToken);
+
+        return connection.QuerySingleOrDefaultAsync<RoleRecord>(command);
     }
 
     public Task UpsertNavigationMapAsync(DbConnection connection, Guid orgId, string value, CancellationToken cancellationToken)
     {
-        return connection.ExecuteAsync(new CommandDefinition(UpsertConfigSql, new { orgId, value }, cancellationToken: cancellationToken));
+        var command = CreateCommand(UpsertConfigSql, parameters =>
+        {
+            parameters.Add("orgId", orgId, DbType.Guid);
+            parameters.Add("value", value, DbType.String);
+        }, cancellationToken);
+
+        return connection.ExecuteAsync(command);
+    }
+
+    private static CommandDefinition CreateCommand(string sql, Action<DynamicParameters> configureParameters, CancellationToken cancellationToken)
+    {
+        var parameters = new DynamicParameters();
+        configureParameters(parameters);
+        return new CommandDefinition(sql, parameters, cancellationToken: cancellationToken);
     }
 }
