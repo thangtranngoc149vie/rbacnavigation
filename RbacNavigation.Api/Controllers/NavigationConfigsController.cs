@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using RbacNavigation.Api.Authorization;
 using RbacNavigation.Api.Extensions;
 using RbacNavigation.Api.Services;
 
@@ -12,53 +13,94 @@ namespace RbacNavigation.Api.Controllers;
 public sealed class NavigationConfigsController : ControllerBase
 {
     private readonly NavigationRepository _repository;
+    private readonly IAuthorizationService _authorizationService;
+    private readonly ICurrentUserContextAccessor _userContextAccessor;
+    private readonly NavigationContentSanitizer _sanitizer;
     private readonly ILogger<NavigationConfigsController> _logger;
 
-    public NavigationConfigsController(NavigationRepository repository, ILogger<NavigationConfigsController> logger)
+    public NavigationConfigsController(
+        NavigationRepository repository,
+        IAuthorizationService authorizationService,
+        ICurrentUserContextAccessor userContextAccessor,
+        NavigationContentSanitizer sanitizer,
+        ILogger<NavigationConfigsController> logger)
     {
         _repository = repository;
+        _authorizationService = authorizationService;
+        _userContextAccessor = userContextAccessor;
+        _sanitizer = sanitizer;
         _logger = logger;
     }
 
     [HttpGet]
     public async Task<IActionResult> GetNavigationConfigAsync(CancellationToken cancellationToken)
     {
-        if (!User.TryGetUserId(out var userId) || !User.TryGetOrgId(out var orgId))
+        var userContext = await _userContextAccessor.GetCurrentAsync(cancellationToken);
+        if (userContext is null)
         {
             _logger.LogWarning("Navigation config fetch denied due to invalid token.");
             return Unauthorized(new { error = "invalid_token" });
         }
 
-        _logger.LogInformation("User {UserId} requested navigation configuration for organization {OrgId}.", userId, orgId);
-
-        await using var connection = await _repository.CreateOpenConnectionAsync(cancellationToken);
-
-        var currentUserRole = await _repository.GetUserRoleAsync(connection, userId, cancellationToken);
-        if (currentUserRole is null)
+        var rbacResult = await _authorizationService.AuthorizeAsync(
+            User,
+            resource: null,
+            requirements: new[]
+            {
+                PermissionsRequirement.AnyOf(
+                    PermissionDescriptor.From("admin", "user_mgmt", "read"),
+                    PermissionDescriptor.From("admin", "user_mgmt", "edit"))
+            });
+        if (!rbacResult.Succeeded)
         {
-            _logger.LogWarning("User {UserId} not found while fetching navigation configuration for organization {OrgId}.", userId, orgId);
-            return Unauthorized(new { error = "user_not_found" });
-        }
-
-        var permissions = PermissionSet.FromJson(currentUserRole.PermissionsJson);
-        if (!permissions.AllowsAny(("admin", "user_mgmt", "read"), ("admin", "user_mgmt", "edit")))
-        {
-            _logger.LogWarning("User {UserId} attempted to fetch navigation configuration for organization {OrgId} without admin permissions.", userId, orgId);
+            _logger.LogWarning(
+                "User {UserId} attempted to fetch navigation configuration for organization {OrgId} without admin permissions.",
+                userContext.UserId,
+                userContext.OrgId);
             return Forbid();
         }
 
-        var navMapJson = await _repository.GetNavigationMapAsync(connection, orgId, cancellationToken);
+        var abacResult = await _authorizationService.AuthorizeAsync(
+            User,
+            new OrgResource(User.TryGetOrgId(out var tokenOrgId) ? tokenOrgId : userContext.OrgId),
+            new[] { OrganizationScopeRequirement.Instance });
+        if (!abacResult.Succeeded)
+        {
+            _logger.LogWarning(
+                "User {UserId} attempted to fetch navigation configuration outside organization scope {OrgId} (token: {TokenOrgId}).",
+                userContext.UserId,
+                userContext.OrgId,
+                tokenOrgId);
+            return Forbid();
+        }
+
+        _logger.LogInformation(
+            "User {UserId} requested navigation configuration for organization {OrgId}.",
+            userContext.UserId,
+            userContext.OrgId);
+
+        await using var connection = await _repository.CreateOpenConnectionAsync(cancellationToken);
+
+        var navMapJson = await _repository.GetNavigationMapAsync(connection, userContext.OrgId, cancellationToken);
         if (navMapJson is null)
         {
-            _logger.LogWarning("Navigation configuration not found for organization {OrgId} when requested by user {UserId}.", orgId, userId);
+            _logger.LogWarning(
+                "Navigation configuration not found for organization {OrgId} when requested by user {UserId}.",
+                userContext.OrgId,
+                userContext.UserId);
             return NotFound(new { error = "nav_not_configured" });
         }
 
-        using var document = JsonDocument.Parse(navMapJson);
-        _logger.LogInformation("Navigation configuration returned for organization {OrgId} to user {UserId}.", orgId, userId);
+        var sanitizedNavMapJson = _sanitizer.Sanitize(navMapJson);
+
+        using var document = JsonDocument.Parse(sanitizedNavMapJson);
+        _logger.LogInformation(
+            "Navigation configuration returned for organization {OrgId} to user {UserId}.",
+            userContext.OrgId,
+            userContext.UserId);
         return Ok(new
         {
-            org_id = orgId,
+            org_id = userContext.OrgId,
             value = document.RootElement.Clone()
         });
     }
@@ -66,7 +108,8 @@ public sealed class NavigationConfigsController : ControllerBase
     [HttpPut]
     public async Task<IActionResult> UpsertNavigationConfigAsync([FromBody] JsonDocument payload, CancellationToken cancellationToken)
     {
-        if (!User.TryGetUserId(out var userId) || !User.TryGetOrgId(out var orgId))
+        var userContext = await _userContextAccessor.GetCurrentAsync(cancellationToken);
+        if (userContext is null)
         {
             _logger.LogWarning("Navigation config update denied due to invalid token.");
             return Unauthorized(new { error = "invalid_token" });
@@ -74,36 +117,61 @@ public sealed class NavigationConfigsController : ControllerBase
 
         if (payload.RootElement.ValueKind != JsonValueKind.Object)
         {
-            _logger.LogWarning("Navigation config update rejected for organization {OrgId} by user {UserId} due to invalid payload root.", orgId, userId);
+            _logger.LogWarning(
+                "Navigation config update rejected for organization {OrgId} by user {UserId} due to invalid payload root.",
+                userContext.OrgId,
+                userContext.UserId);
             return BadRequest(new { error = "invalid_payload" });
         }
 
         if (!payload.RootElement.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
         {
-            _logger.LogWarning("Navigation config update rejected for organization {OrgId} by user {UserId} due to invalid items definition.", orgId, userId);
+            _logger.LogWarning(
+                "Navigation config update rejected for organization {OrgId} by user {UserId} due to invalid items definition.",
+                userContext.OrgId,
+                userContext.UserId);
             return BadRequest(new { error = "invalid_nav_map" });
+        }
+
+        var rbacResult = await _authorizationService.AuthorizeAsync(
+            User,
+            resource: null,
+            requirements: new[]
+            {
+                PermissionsRequirement.AllOf(PermissionDescriptor.From("admin", "user_mgmt", "edit"))
+            });
+        if (!rbacResult.Succeeded)
+        {
+            _logger.LogWarning(
+                "User {UserId} attempted to update navigation configuration for organization {OrgId} without admin edit permissions.",
+                userContext.UserId,
+                userContext.OrgId);
+            return Forbid();
+        }
+
+        var abacResult = await _authorizationService.AuthorizeAsync(
+            User,
+            new OrgResource(User.TryGetOrgId(out var tokenOrgId) ? tokenOrgId : userContext.OrgId),
+            new[] { OrganizationScopeRequirement.Instance });
+        if (!abacResult.Succeeded)
+        {
+            _logger.LogWarning(
+                "User {UserId} attempted to update navigation configuration outside organization scope {OrgId} (token: {TokenOrgId}).",
+                userContext.UserId,
+                userContext.OrgId,
+                tokenOrgId);
+            return Forbid();
         }
 
         await using var connection = await _repository.CreateOpenConnectionAsync(cancellationToken);
 
-        var currentUserRole = await _repository.GetUserRoleAsync(connection, userId, cancellationToken);
-        if (currentUserRole is null)
-        {
-            _logger.LogWarning("User {UserId} not found while updating navigation configuration for organization {OrgId}.", userId, orgId);
-            return Unauthorized(new { error = "user_not_found" });
-        }
+        var sanitizedJson = _sanitizer.Sanitize(payload.RootElement);
+        await _repository.UpsertNavigationMapAsync(connection, userContext.OrgId, sanitizedJson, cancellationToken);
 
-        var permissions = PermissionSet.FromJson(currentUserRole.PermissionsJson);
-        if (!permissions.AllowsAny(("admin", "user_mgmt", "edit")))
-        {
-            _logger.LogWarning("User {UserId} attempted to update navigation configuration for organization {OrgId} without admin edit permissions.", userId, orgId);
-            return Forbid();
-        }
-
-        var json = payload.RootElement.GetRawText();
-        await _repository.UpsertNavigationMapAsync(connection, orgId, json, cancellationToken);
-
-        _logger.LogInformation("Navigation configuration upserted for organization {OrgId} by user {UserId}.", orgId, userId);
-        return Ok(new { org_id = orgId, status = "upserted" });
+        _logger.LogInformation(
+            "Navigation configuration upserted for organization {OrgId} by user {UserId}.",
+            userContext.OrgId,
+            userContext.UserId);
+        return Ok(new { org_id = userContext.OrgId, status = "upserted" });
     }
 }

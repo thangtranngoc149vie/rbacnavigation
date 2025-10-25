@@ -41,32 +41,50 @@ public sealed class CurrentUserContextAccessor : ICurrentUserContextAccessor
             return null;
         }
 
+        CancellationTokenSource? linkedCts = null;
         var effectiveToken = cancellationToken;
-        if (!effectiveToken.CanBeCanceled)
+        var requestAborted = httpContext.RequestAborted;
+
+        if (requestAborted.CanBeCanceled)
         {
-            effectiveToken = httpContext.RequestAborted;
+            if (!effectiveToken.CanBeCanceled)
+            {
+                effectiveToken = requestAborted;
+            }
+            else if (!effectiveToken.Equals(requestAborted))
+            {
+                linkedCts = CancellationTokenSource.CreateLinkedTokenSource(effectiveToken, requestAborted);
+                effectiveToken = linkedCts.Token;
+            }
         }
 
-        await using var connection = await _repository.CreateOpenConnectionAsync(effectiveToken);
-        var record = await _repository.GetUserRoleAsync(connection, userId, effectiveToken);
-        if (record is null)
+        try
         {
-            _logger.LogWarning("Failed to resolve current user context because user {UserId} was not found.", userId);
-            return null;
-        }
+            await using var connection = await _repository.CreateOpenConnectionAsync(effectiveToken);
+            var record = await _repository.GetUserRoleAsync(connection, userId, effectiveToken);
+            if (record is null)
+            {
+                _logger.LogWarning("Failed to resolve current user context because user {UserId} was not found.", userId);
+                return null;
+            }
 
-        if (httpContext.User.TryGetOrgId(out var tokenOrgId) && tokenOrgId != record.OrgId)
+            if (httpContext.User.TryGetOrgId(out var tokenOrgId) && tokenOrgId != record.OrgId)
+            {
+                _logger.LogWarning(
+                    "User {UserId} attempted to operate within organization {RequestedOrgId} but belongs to organization {ActualOrgId}.",
+                    userId,
+                    tokenOrgId,
+                    record.OrgId);
+            }
+
+            var permissions = PermissionSet.FromJson(record.PermissionsJson);
+            var context = new CurrentUserContext(userId, record.OrgId, record.RoleId, record.RoleName, record.PermissionsJson, permissions);
+            httpContext.Items[ContextItemKey] = context;
+            return context;
+        }
+        finally
         {
-            _logger.LogWarning(
-                "User {UserId} attempted to operate within organization {RequestedOrgId} but belongs to organization {ActualOrgId}.",
-                userId,
-                tokenOrgId,
-                record.OrgId);
+            linkedCts?.Dispose();
         }
-
-        var permissions = PermissionSet.FromJson(record.PermissionsJson);
-        var context = new CurrentUserContext(userId, record.OrgId, record.RoleId, record.RoleName, record.PermissionsJson, permissions);
-        httpContext.Items[ContextItemKey] = context;
-        return context;
     }
 }
