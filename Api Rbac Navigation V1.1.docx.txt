@@ -1,0 +1,286 @@
+﻿API “Bảng điều hướng theo vai trò” (RBAC Navigation) — Full Spec v1.1
+Mục tiêu: Dev đọc xong cắm code được ngay toàn bộ API điều hướng theo vai trò (bao gồm cả đăng nhập và /me). Tài liệu bám schema v3 hiện có, không bịa thêm bảng. Stack tham chiếu: .NET 8 + Dapper + Npgsql + PostgreSQL (schema v3), FE React/TypeScript + SLDS2.
+________________
+
+
+0) Scope & Nguyên tắc
+* Base URL: /api/v1
+* Auth: JWT Bearer trong header Authorization: Bearer <token>.
+* Tenant: luôn lọc theo org_id lấy từ token.
+* ETag/Cache: các API GET hỗ trợ ETag + If-None-Match khi hợp lý.
+* Schema dùng: users, roles, configs (không thêm bảng mới).
+   * users: có id, org_id, role_id, (email/username, các cột khác theo thực tế schema v3).
+   * roles: có id, name, permissions JSONB, description, audit cols.
+   * configs: có org_id, key, value JSONB, unique (org_id, key).
+Ghi chú: Nếu hệ thống dùng SSO/IdP (Keycloak/AzureAD/…): /auth/* có thể là gateway/proxy/token-exchange. Nếu đang dùng local login, tận dụng cột hiện có của users (ví dụ email, password_hash)—không tạo thêm bảng.
+________________
+
+
+1) Mẫu dữ liệu tham chiếu
+1.1 roles.permissions (ví dụ JSONB)
+{
+  "crm": { "tickets": ["read","create","assign"], "requests": ["read","approve"] },
+  "office": { "procurement": ["read","create","approve"] },
+  "project": { "timeline": ["read","edit"], "documents": ["read","upload"] },
+  "admin": { "user_mgmt": ["read","edit"] }
+}
+1.2 configs.value cho nav_map_v1
+{
+  "version": 1,
+  "items": [
+    { "key": "dashboard", "label": "Tổng quan", "icon": "Home", "route": "/dashboard", "requires": [] },
+    { "key": "crm_tickets", "label": "Yêu cầu (Ticket)", "icon": "Ticket", "route": "/crm/tickets", "requires": [["crm","tickets","read"]] },
+    { "key": "crm_requests", "label": "Đề nghị (Request)", "icon": "Inbox", "route": "/crm/requests", "requires": [["crm","requests","read"]] },
+    { "key": "office_proc", "label": "Mua sắm nội bộ", "icon": "Cart", "route": "/office/procurement", "requires": [["office","procurement","read"]] },
+    { "key": "project_timeline", "label": "Tiến độ dự án", "icon": "Gantt", "route": "/project/timeline", "requires": [["project","timeline","read"]] },
+    { "key": "admin_users", "label": "Quản trị người dùng", "icon": "Shield", "route": "/admin/users", "requires": [["admin","user_mgmt","read"]] }
+  ]
+}
+________________
+
+
+2) AUTH & SESSION APIs
+Nếu dùng SSO: các API này là façade. Nếu local login: dùng users để đối chiếu, không thêm bảng.
+2.1 POST /auth/login
+Mục đích: Đăng nhập lấy JWT.
+Body (local login ví dụ):
+{ "username": "user@example.com", "password": "***" }
+Response 200:
+{ "access_token": "<jwt>", "token_type": "Bearer", "expires_in": 3600 }
+Response 401: { "error": "invalid_credentials" }
+Pseudo (local):
+* Tìm user theo username (email/username) trong users cùng org (nếu đa-tenant theo domain).
+* Kiểm tra password_hash (nếu có). Nếu dùng IdP, forward/verify token.
+* Sinh JWT có sub, org_id, role_id.
+2.2 POST /auth/refresh
+Body: { "refresh_token": "…" } (nếu áp dụng). Response 200: { "access_token": "…" }
+2.3 GET /me
+Mục đích: Lấy hồ sơ người dùng hiện tại + vai trò.
+Response 200:
+{
+  "id": "…",
+  "org_id": "…",
+  "role": { "id": "…", "name": "…", "permissions": {…} },
+  "profile": { "display_name": "…", "email": "…" }
+}
+SQL (ví dụ):
+SELECT u.id, u.org_id, u.role_id, u.display_name, u.email,
+       r.name AS role_name, r.permissions
+FROM users u
+JOIN roles r ON r.id = u.role_id
+WHERE u.id = @user_id;
+2.4 POST /auth/logout
+Mục đích: FE chủ yếu xoá token phía client. Nếu dùng refresh token/denylist thì ghi nhận vào store hiện có (nếu có). Không yêu cầu bảng mới.
+________________
+
+
+3) NAVIGATION APIs
+3.1 GET /navigation — trả menu theo user hiện tại
+Mục đích: FE dựng sidebar/top-nav đúng vai trò.
+Response 200:
+{
+  "org_id": "…",
+  "role": { "id":"…","name":"…" },
+  "items": [ { "key":"dashboard","label":"Tổng quan","route":"/dashboard","icon":"Home" } ],
+  "derived_permissions": {
+    "crm.tickets": ["read","create","assign"],
+    "project.timeline": ["read","edit"]
+  },
+  "etag": "\"nav-6f3a…\""
+}
+SQL:
+-- role + permissions
+SELECT u.org_id, r.id AS role_id, r.name AS role_name, r.permissions
+FROM users u
+JOIN roles r ON r.id = u.role_id
+WHERE u.id = @user_id;
+
+-- nav map của org
+SELECT value
+FROM configs
+WHERE org_id = @org_id AND key = 'nav_map_v1'
+LIMIT 1;
+3.2 GET /navigation/preview?role_id=… — xem trước menu theo 1 vai trò (admin)
+SQL:
+SELECT permissions FROM roles WHERE id = @role_id;
+SELECT value FROM configs WHERE org_id = @org_id AND key = 'nav_map_v1' LIMIT 1;
+3.3 GET /configs/navigation — lấy nav map hiện hành (admin)
+SQL:
+SELECT value FROM configs WHERE org_id = @org_id AND key = 'nav_map_v1' LIMIT 1;
+3.4 PUT /configs/navigation — cập nhật nav map (admin)
+Body: {toàn bộ JSON nav_map_v1}
+SQL (UPSERT):
+INSERT INTO configs (id, org_id, key, value, created_at)
+VALUES (uuid_generate_v4(), @org, 'nav_map_v1', @value::jsonb, now())
+ON CONFLICT (org_id, key)
+DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+________________
+
+
+4) ROLE APIs (CRUD)
+4.1 GET /roles
+Response:
+{ "items": [ { "id":"…","name":"…","permissions":{…},"description":"…" } ] }
+SQL:
+SELECT id, name, permissions, description FROM roles ORDER BY name;
+4.2 GET /roles/{id}
+SQL:
+SELECT id, name, permissions, description FROM roles WHERE id = @id;
+4.3 POST /roles
+Body:
+{ "name": "Office Approver", "description":"Duyệt mua sắm", "permissions": { "office": { "procurement": ["read","approve"] } } }
+SQL:
+INSERT INTO roles (id, name, permissions, description, created_at)
+VALUES (uuid_generate_v4(), @name, @permissions::jsonb, @description, now())
+RETURNING id;
+4.4 PUT /roles/{id}
+SQL:
+UPDATE roles
+SET name = @name,
+    permissions = @permissions::jsonb,
+    description = @description,
+    updated_at = now()
+WHERE id = @id;
+4.5 DELETE /roles/{id}
+Logic: chỉ xoá khi không có user tham chiếu.
+SQL:
+SELECT 1 FROM users WHERE role_id = @id LIMIT 1; -- nếu có bản ghi => 409
+DELETE FROM roles WHERE id = @id;                -- nếu không có tham chiếu
+4.6 PATCH /users/{id}/role — đổi vai trò cho user (admin)
+Body: { "role_id": "…" }
+SQL:
+UPDATE users
+SET role_id = @role_id, updated_at = now()
+WHERE id = @user_id AND org_id = @org_id; -- chặn cross-tenant
+________________
+
+
+5) SECURITY, ERROR & ETag
+5.1 Quyền truy cập
+* /auth/*: public (trừ refresh có thể yêu cầu token).
+* /me: yêu cầu token hợp lệ.
+* /navigation: yêu cầu token hợp lệ.
+* /navigation/preview, /configs/navigation, CRUD /roles, PATCH /users/{id}/role: yêu cầu quyền admin, ví dụ admin.user_mgmt có read/edit.
+5.2 Lỗi thường gặp
+* 401 unauthorized – thiếu/invalid token.
+* 403 forbidden – không đủ quyền admin.
+* 404 not_found – chưa cấu hình nav_map_v1 cho org.
+* 409 conflict – xoá role đang được user tham chiếu.
+5.3 ETag
+* ETag của /navigation = hash(role.permissions + nav_map_v1).
+* Hỗ trợ If-None-Match → trả 304 nếu không đổi.
+________________
+
+
+6) Pseudocode & Code khung (.NET 8 + Dapper)
+[Authorize]
+[HttpGet("/api/v1/navigation")]
+public async Task<IActionResult> GetNav() {
+    var userId = User.Sub();
+    var orgId = User.OrgId();
+
+    var urp = await db.QuerySingleAsync<(Guid OrgId, Guid RoleId, string RoleName, string PermJson)>(
+        @"SELECT u.org_id, r.id, r.name, r.permissions::text
+          FROM users u JOIN roles r ON r.id = u.role_id
+          WHERE u.id = @userId", new { userId });
+
+    var navJson = await db.QuerySingleOrDefaultAsync<string>(
+        @"SELECT value::text FROM configs
+          WHERE org_id = @org AND key='nav_map_v1' LIMIT 1",
+        new { org = urp.OrgId });
+
+    if (navJson is null) return NotFound(new { error = "nav_not_configured" });
+
+    var etag = ComputeETag(urp.PermJson + navJson);
+    if (Request.Headers.IfNoneMatch(etag)) return StatusCode(304);
+
+    var items = FilterByPermissions(ParseNav(navJson).Items, ParsePerms(urp.PermJson));
+    return Ok(new {
+        org_id = urp.OrgId,
+        role = new { id = urp.RoleId, name = urp.RoleName },
+        items,
+        derived_permissions = Flatten(urp.PermJson),
+        etag
+    });
+}
+[Authorize]
+[HttpGet("/api/v1/me")]
+public async Task<IActionResult> Me() {
+    var userId = User.Sub();
+    var u = await db.QuerySingleAsync(
+        @"SELECT u.id, u.org_id, u.role_id, u.display_name, u.email,
+                 r.name AS role_name, r.permissions
+          FROM users u JOIN roles r ON r.id = u.role_id
+          WHERE u.id = @userId", new { userId });
+    return Ok(new {
+        id = u.id,
+        org_id = u.org_id,
+        role = new { id = u.role_id, name = u.role_name, permissions = u.permissions },
+        profile = new { display_name = u.display_name, email = u.email }
+    });
+}
+________________
+
+
+7) Test kịch bản nhanh (DEV Checklist)
+1. Seed 2 roles (CRM vs Admin) với permissions JSONB như mẫu.
+2. Gán role_id cho 2 users khác nhau.
+3. Upsert configs(org_id, 'nav_map_v1', value) theo JSON mẫu.
+4. POST /auth/login lấy token → GET /me kiểm tra.
+5. GET /navigation bằng 2 token → menu khác nhau.
+6. PUT /configs/navigation đổi label/route → GET /navigation đổi theo.
+7. CRUD /roles + PATCH /users/{id}/role → kiểm chứng rule 409 khi xoá role đang được tham chiếu.
+________________
+
+
+8) OpenAPI (rút gọn để import nhanh)
+openapi: 3.0.3
+info: { title: RBAC Navigation API, version: 1.1 }
+servers: [ { url: /api/v1 } ]
+paths:
+  /auth/login:
+    post: { summary: Login, requestBody: { required: true }, responses: { '200': { description: OK }, '401': { description: Invalid } } }
+  /auth/refresh:
+    post: { summary: Refresh token, requestBody: { required: true }, responses: { '200': { description: OK } } }
+  /auth/logout:
+    post: { summary: Logout, responses: { '204': { description: No Content } } }
+  /me:
+    get: { security: [ { bearerAuth: [] } ], responses: { '200': { description: OK } } }
+  /navigation:
+    get: { security: [ { bearerAuth: [] } ], responses: { '200': { description: OK }, '304': { description: Not Modified } } }
+  /navigation/preview:
+    get:
+      security: [ { bearerAuth: [] } ]
+      parameters: [ { in: query, name: role_id, schema: { type: string, format: uuid }, required: true } ]
+      responses: { '200': { description: OK } }
+  /configs/navigation:
+    get: { security: [ { bearerAuth: [] } ], responses: { '200': { description: OK }, '404': { description: Not Found } } }
+    put: { security: [ { bearerAuth: [] } ], requestBody: { required: true }, responses: { '200': { description: Upserted } } }
+  /roles:
+    get: { security: [ { bearerAuth: [] } ], responses: { '200': { description: OK } } }
+    post: { security: [ { bearerAuth: [] } ], requestBody: { required: true }, responses: { '201': { description: Created } } }
+  /roles/{id}:
+    get: { security: [ { bearerAuth: [] } ], responses: { '200': { description: OK }, '404': { description: Not Found } } }
+    put: { security: [ { bearerAuth: [] } ], requestBody: { required: true }, responses: { '200': { description: Updated } } }
+    delete: { security: [ { bearerAuth: [] } ], responses: { '204': { description: Deleted }, '409': { description: Conflict } } }
+  /users/{id}/role:
+    patch: { security: [ { bearerAuth: [] } ], requestBody: { required: true }, responses: { '200': { description: OK } } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+________________
+
+
+9) DoD — Definition of Done
+________________
+
+
+Phụ lục A — Mapping quyền → menu (thuật toán)
+bool Can(string[] t, JObject p) => p?[t[0]]?[t[1]]?.Any(a => (string)a == t[2]) ?? false;
+IEnumerable<MenuItem> FilterByPermissions(NavMap m, JObject p) =>
+  m.Items.Where(i => i.Requires.Count == 0 || i.Requires.Any(req => Can(req, p)))
+          .Select(i => i.StripRequires());
+Phụ lục B — Gợi ý Migration (nếu thiếu index)
+* configs: UNIQUE (org_id, key) (đã có).
+* users.role_id, users.org_id: index nếu dataset lớn.
+* roles.name: index phục vụ list/order.
