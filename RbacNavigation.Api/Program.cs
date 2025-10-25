@@ -5,87 +5,116 @@ using Microsoft.Net.Http.Headers;
 using Microsoft.OpenApi.Models;
 using RbacNavigation.Api.Data;
 using RbacNavigation.Api.Services;
+using Serilog;
 
-var builder = WebApplication.CreateBuilder(args);
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Console()
+    .CreateBootstrapLogger();
 
-builder.Services.AddControllers(options =>
+try
 {
-    options.SuppressImplicitRequiredAttributeForNonNullableReferenceTypes = true;
-}).AddJsonOptions(options =>
-{
-    options.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
-    options.JsonSerializerOptions.DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
-});
+    var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.Configure<RouteOptions>(options =>
-{
-    options.LowercaseUrls = true;
-    options.LowercaseQueryStrings = false;
-});
-
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen(setup =>
-{
-    setup.SwaggerDoc("v1", new OpenApiInfo
+    builder.Host.UseSerilog((context, services, configuration) =>
     {
-        Title = "RBAC Navigation API",
-        Version = "v1.1"
+        configuration
+            .ReadFrom.Configuration(context.Configuration)
+            .ReadFrom.Services(services)
+            .Enrich.FromLogContext()
+            .WriteTo.Console();
     });
-    setup.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+
+    builder.Services.AddControllers(options =>
     {
-        Name = HeaderNames.Authorization,
-        Type = SecuritySchemeType.Http,
-        Scheme = JwtBearerDefaults.AuthenticationScheme,
-        BearerFormat = "JWT",
-        In = ParameterLocation.Header,
-        Description = "JWT Bearer token"
+        options.SuppressImplicitRequiredAttributeForNonNullableReferenceTypes = true;
+    }).AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
+        options.JsonSerializerOptions.DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull;
     });
-    setup.AddSecurityRequirement(new OpenApiSecurityRequirement
+
+    builder.Services.Configure<RouteOptions>(options =>
     {
+        options.LowercaseUrls = true;
+        options.LowercaseQueryStrings = false;
+    });
+
+    builder.Services.AddEndpointsApiExplorer();
+    builder.Services.AddSwaggerGen(setup =>
+    {
+        setup.SwaggerDoc("v1", new OpenApiInfo
         {
-            new OpenApiSecurityScheme
+            Title = "RBAC Navigation API",
+            Version = "v1.1"
+        });
+        setup.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+        {
+            Name = HeaderNames.Authorization,
+            Type = SecuritySchemeType.Http,
+            Scheme = JwtBearerDefaults.AuthenticationScheme,
+            BearerFormat = "JWT",
+            In = ParameterLocation.Header,
+            Description = "JWT Bearer token"
+        });
+        setup.AddSecurityRequirement(new OpenApiSecurityRequirement
+        {
             {
-                Reference = new OpenApiReference
+                new OpenApiSecurityScheme
                 {
-                    Type = ReferenceType.SecurityScheme,
-                    Id = "Bearer"
-                }
-            },
-            Array.Empty<string>()
-        }
+                    Reference = new OpenApiReference
+                    {
+                        Type = ReferenceType.SecurityScheme,
+                        Id = "Bearer",
+                    }
+                },
+                Array.Empty<string>()
+            }
+        });
     });
-});
 
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer();
+    builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        .AddJwtBearer();
 
-builder.Services.AddAuthorization();
+    builder.Services.AddAuthorization();
 
-builder.Services.AddSingleton<IDbConnectionFactory>(sp =>
-{
-    var configuration = sp.GetRequiredService<IConfiguration>();
-    var connectionString = configuration.GetConnectionString("Default");
-    if (string.IsNullOrWhiteSpace(connectionString))
+    builder.Services.AddSingleton<IDbConnectionFactory>(sp =>
     {
-        throw new InvalidOperationException("Connection string 'Default' must be configured.");
-    }
+        var configuration = sp.GetRequiredService<IConfiguration>();
+        var connectionString = configuration.GetConnectionString("Default");
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new InvalidOperationException("Connection string 'Default' must be configured.");
+        }
 
-    return new NpgsqlConnectionFactory(connectionString);
-});
+        return new NpgsqlConnectionFactory(connectionString);
+    });
 
-builder.Services.AddScoped<NavigationRepository>();
-builder.Services.AddScoped<NavigationComposer>();
+    builder.Services.AddScoped<NavigationRepository>();
+    builder.Services.AddScoped<NavigationComposer>();
 
-var app = builder.Build();
+    var app = builder.Build();
 
-app.UseSwagger();
-app.UseSwaggerUI();
+    app.UseSerilogRequestLogging();
 
-app.UseHttpsRedirection();
+    app.UseSwagger();
+    app.UseSwaggerUI();
 
-app.UseAuthentication();
-app.UseAuthorization();
+    app.UseHttpsRedirection();
 
-app.MapControllers();
+    app.UseAuthentication();
+    app.UseAuthorization();
 
-app.Run();
+    app.MapControllers();
+
+    Log.Information("RBAC Navigation API started");
+
+    app.Run();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Application terminated unexpectedly");
+}
+finally
+{
+    Log.CloseAndFlush();
+}
