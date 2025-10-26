@@ -13,16 +13,20 @@ public sealed class NavigationComposer
         PropertyNameCaseInsensitive = true
     };
 
+    public NavMapDocument Deserialize(string navJson)
+    {
+        return JsonSerializer.Deserialize<NavMapDocument>(navJson, SerializerOptions)
+            ?? throw new InvalidOperationException("Navigation map is not a valid JSON document.");
+    }
+
     public NavigationComposition Compose(string navJson, PermissionSet permissionSet)
     {
-        var navMap = JsonSerializer.Deserialize<NavMapDocument>(navJson, SerializerOptions)
-            ?? throw new InvalidOperationException("Navigation map is not a valid JSON document.");
+        var navMap = Deserialize(navJson);
 
         var items = new List<NavigationItemDto>();
         foreach (var item in navMap.Items)
         {
-            var requires = item.Requires?.Select(r => (IReadOnlyList<string>)r).ToList();
-            if (permissionSet.Allows(requires))
+            if (permissionSet.Allows(item.Requires))
             {
                 items.Add(new NavigationItemDto(item.Key, item.Label, item.Route, item.Icon));
             }

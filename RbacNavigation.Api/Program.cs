@@ -103,6 +103,7 @@ try
 
     builder.Services.AddScoped<NavigationRepository>();
     builder.Services.AddScoped<NavigationComposer>();
+    builder.Services.AddScoped<NavigationService>();
 
     var app = builder.Build();
 

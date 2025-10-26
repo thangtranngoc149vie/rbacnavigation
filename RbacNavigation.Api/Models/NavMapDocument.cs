@@ -26,5 +26,6 @@ public sealed class NavMapItem
     public string Route { get; init; } = string.Empty;
 
     [JsonPropertyName("requires")]
-    public List<List<string>>? Requires { get; init; }
+    [JsonConverter(typeof(NavigationScopeRequirementCollectionConverter))]
+    public List<NavigationScopeRequirement>? Requires { get; init; }
 }

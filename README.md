@@ -33,14 +33,36 @@ RBAC Navigation API cung cấp các API điều hướng theo tài liệu "Api R
 | Phương thức | Đường dẫn | Mô tả |
 |-------------|-----------|-------|
 | `GET` | `/api/v1/navigation` | Trả về menu điều hướng cho người dùng hiện tại dựa trên quyền và tenant. |
-| `GET` | `/api/v1/navigation/preview` | Xem trước menu của một vai trò khác trong cùng tổ chức (cần quyền admin). |
+| `POST` | `/api/v1/navigation/preview` | Cho phép quản trị viên giả lập quyền, người dùng hoặc bản nháp cấu hình để xem trước menu cùng chẩn đoán. |
 | `GET` | `/api/v1/configs/navigation` | Lấy cấu hình điều hướng hiện tại cho tenant (cần quyền admin). |
 | `PUT` | `/api/v1/configs/navigation` | Cập nhật cấu hình điều hướng sau khi hợp lệ JSON và quyền admin. |
+
+### Chuẩn hóa `requires`
+- Hỗ trợ đồng thời hai “dialect” cho điều kiện hiển thị menu:
+  - Dạng tuple gốc: `"requires": [["crm","tickets","read"],["project","timeline","read"]]`.
+  - Dạng chuỗi phẳng: `"requires": ["crm:tickets:read","project:timeline:read"]`.
+- Mỗi phần tử trong `requires` được xem là một lựa chọn (quan hệ `OR`). Khi evaluate:
+  - Tất cả tuple được chuẩn hóa thành chuỗi `domain:area:action`.
+  - Hệ thống kiểm tra quyền chính xác hoặc wildcard hậu tố (`crm:tickets:*`).
+  - Nếu danh sách rỗng hoặc bị bỏ qua thì item được xem là public.
+
+### `POST /api/v1/navigation/preview`
+- Cho phép truyền bản nháp cấu hình (`draft_nav_value`), giả lập user/role (`as_user_id`, `as_role_id`) hoặc bộ quyền (`as_permissions`).
+- Các tùy chọn `include_hidden` (mặc định `true`) và `return_reason` (mặc định `true`) kiểm soát việc trả về item ẩn và thông điệp chẩn đoán.
+- Mỗi item trong response bao gồm:
+  - `visible`: kết quả evaluate quyền.
+  - `requires`: danh sách scope dạng chuỗi.
+  - `reason`: thông điệp `matched:` hoặc `missing:` cho scope đầu tiên, hoặc `public` nếu không cần quyền.
+  - `matched_scope`: scope thực tế thỏa mãn (khi có).
 
 ## Kiểm thử
 Sử dụng `dotnet build` để đảm bảo dự án biên dịch thành công. Có thể bổ sung kiểm thử tự động trong tương lai.
 
 ## Ghi chú phiên bản
+- **v1.1.2**
+  - Chuẩn hóa xử lý `requires` với cả tuple và chuỗi phẳng, hỗ trợ wildcard `*` ở hành động.
+  - Tách service `NavigationService` để gom logic lấy dữ liệu, sanitize và evaluate quyền cho cả API navigation và preview.
+  - Nâng cấp API preview sang `POST`, bổ sung khả năng giả lập quyền/bản nháp cùng lý do hiển thị từng menu.
 - **v1.1.1**
   - Tài liệu hóa các tính năng RBAC/ABAC, logging Serilog và các biện pháp chống SQL Injection/XSS.
   - Bổ sung ghi chú phiên bản trong README để dễ dàng theo dõi thay đổi.
